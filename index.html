@@ -441,7 +441,7 @@
     async function sendFonnteWhatsAppNotification(messageText) {
         const token = appState.profile.fonnteToken || '';
         const phone = appState.profile.whatsappNumber || '';
-        if (!token || !phone) return; // Belum dikonfigurasi
+        if (!token || !phone) return;
 
         try {
             const formData = new URLSearchParams();
@@ -462,7 +462,7 @@
         }
     }
 
-    const STORAGE_KEY = 'xikai_asset_public_whatsapp_v1';
+    const STORAGE_KEY = 'xikai_asset_public_whatsapp_v2';
     const blankPublicData = {
         settings: { sfxEnabled: true },
         profile: {
@@ -484,6 +484,17 @@
     let appState = loadState();
     let currentTab = 'project';
     let projectSubFilter = 'all';
+    let tempFarmingModalMode = 'paid';
+    let tempFarmingBuyCalcMode = 'divide';
+    let tempFarmingCalcMode = 'divide';
+    let tempNgemassBatches = [{ batchNo: 1, rows: [{ stock: '', price: '' }] }];
+    let tempNgemassSeedCountSelector = 1;
+    let tempProfitanMode = 'beli';
+    let tempProfitanImage = '';
+    let activeArchiveTarget = null;
+    let tempSubsidiCalcMode = 'multiply';
+    let tempBaitSellModes = { worm: 'divide', shiny: 'divide', salmon: 'divide', fly: 'divide', shrimp: 'divide', mega: 'divide', uranium: 'divide' };
+    let tempNewProviderType = 'atm';
 
     function loadState() {
         try {
@@ -565,6 +576,54 @@
         return Math.abs(wl) < 100 ? `${formatNumber(wl)} WL` : `${formatNumber(wl)} WL (${formatBglDlWl(wl)})`;
     }
 
+    function renderLineChartSvg(points, strokeColor = '#EC5E27', fillId = 'grad-default', emptyLabel = 'Belum ada data grafik') {
+        const vals = (points && points.length > 0) ? points : [0];
+        if (vals.length === 1 && vals[0] === 0) {
+            return `
+                <div class="h-24 rounded-2xl neu-inset-sm flex flex-col items-center justify-center text-center px-3">
+                    <span class="text-[11px] font-semibold text-[#6E6A63]">${emptyLabel}</span>
+                </div>
+            `;
+        }
+        const series = vals.length === 1 ? [0, vals[0]] : vals;
+        const width = 320, height = 84, padX = 10, padY = 12;
+        const maxVal = Math.max(...series, 1), minVal = Math.min(...series, 0), span = Math.max(maxVal - minVal, 1);
+        const coords = series.map((v, i) => {
+            const x = padX + (i / (series.length - 1)) * (width - padX * 2);
+            const y = height - padY - ((v - minVal) / span) * (height - padY * 2);
+            return { x: Number(x.toFixed(1)), y: Number(y.toFixed(1)), val: v };
+        });
+        const pathD = coords.map((c, idx) => `${idx === 0 ? 'M' : 'L'} ${c.x} ${c.y}`).join(' ');
+        const areaD = `${pathD} L ${coords[coords.length - 1].x} ${height} L ${coords[0].x} ${height} Z`;
+        const last = coords[coords.length - 1];
+
+        return `
+            <div class="rounded-2xl neu-inset-sm p-2.5">
+                <svg viewBox="0 0 ${width} ${height}" class="w-full h-20 overflow-visible">
+                    <defs>
+                        <linearGradient id="${fillId}" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="0%" stop-color="${strokeColor}" stop-opacity="0.26" />
+                            <stop offset="100%" stop-color="${strokeColor}" stop-opacity="0.01" />
+                        </linearGradient>
+                    </defs>
+                    <path d="${areaD}" fill="url(#${fillId})" />
+                    <path d="${pathD}" fill="none" stroke="${strokeColor}" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" />
+                    ${coords.map((c, idx) => `<circle cx="${c.x}" cy="${c.y}" r="${idx === coords.length - 1 ? 4 : 2.5}" fill="#FDFDF1" stroke="${strokeColor}" stroke-width="2" />`).join('')}
+                </svg>
+            </div>
+        `;
+    }
+
+    function getCumulativeModalSeries() {
+        let pSum = 0;
+        const projectSeries = appState.projects.slice().reverse().map(p => { pSum += Number(p.modalWl) || 0; return pSum; });
+        let provSum = 0;
+        const providerSeries = appState.providers.slice().reverse().map(pr => { provSum += Number(pr.totalModalWl) || 0; return provSum; });
+        let profSum = 0;
+        const profitanSeries = appState.profitans.slice().reverse().map(pf => { profSum += pf.mode === 'beli' ? (Number(pf.modalWl) || 0) : 0; return profSum; });
+        return { projectSeries, projectTotalModal: pSum, providerSeries, providerTotalModal: provSum, profitanSeries, profitanTotalModal: profSum };
+    }
+
     function switchTab(tabName) {
         currentTab = tabName;
         playSfx('tab');
@@ -584,17 +643,118 @@
         safeCreateIcons();
     }
 
-    // PROJECT TAB
-    function buildProjectTabHtml() {
-        return `<div class="neu-flat rounded-3xl p-5"><h2 class="font-display font-extrabold text-lg">Project Management</h2><p class="text-xs text-[#6E6A63] mt-1">Gunakan tombol Project di versi lengkap.</p></div>`;
+    // --- TAB 1: PROJECT ---
+    function calculateFarmingEstWl(proj) {
+        const stock = Number(proj.seedStock) || 0, rate = Number(proj.rateValue) || 0;
+        return rate <= 0 ? 0 : (proj.calcMode === 'multiply' ? stock * rate : stock / rate);
     }
 
-    // PROVIDER TAB
+    function buildProjectTabHtml() {
+        let totalEstWl = 0, totalSeedCount = 0;
+        appState.projects.forEach(p => {
+            if (p.type === 'farming') { totalEstWl += calculateFarmingEstWl(p); totalSeedCount += Number(p.seedStock) || 0; }
+            else if (p.type === 'ngemass') { totalEstWl += Number(p.estValueWl) || 0; (p.batches || []).forEach(b => (b.rows || []).forEach(r => totalSeedCount += Number(r.stock) || 0)); }
+        });
+        const { projectSeries, projectTotalModal } = getCumulativeModalSeries();
+        const filteredProjects = appState.projects.filter(p => projectSubFilter === 'all' || p.type === projectSubFilter);
+
+        return `
+            <div class="neu-flat rounded-3xl p-5 space-y-3.5">
+                <div class="flex items-start justify-between">
+                    <div>
+                        <span class="text-[11px] font-bold uppercase tracking-wider text-[#6E6A63]">Estimasi Nilai Project</span>
+                        <h2 class="font-display font-extrabold text-xl text-[#24211E] mt-1">${formatNumber(totalEstWl)} <span class="text-sm font-extrabold text-[#EC5E27]">WL</span></h2>
+                        <span class="text-[11px] font-bold text-[#6E6A63]">${formatBglDlWl(totalEstWl)}</span>
+                    </div>
+                    <button onclick="openProjectTypeSelectorModal()" class="neu-accent-btn px-3.5 py-2.5 rounded-2xl text-xs font-bold flex items-center gap-1.5">+ Project</button>
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                    <div class="neu-inset-sm rounded-2xl p-3"><span class="text-[10px] text-[#6E6A63] block">Modal Seed</span><span class="font-display font-extrabold text-xs">${formatBglDlWl(projectTotalModal)}</span></div>
+                    <div class="neu-inset-sm rounded-2xl p-3"><span class="text-[10px] text-[#6E6A63] block">Total Stok Seed</span><span class="font-display font-extrabold text-xs text-[#EC5E27]">${formatNumber(totalSeedCount)} Seed</span></div>
+                </div>
+                ${renderLineChartSvg(projectSeries, '#EC5E27', 'grad-proj', 'Grafik Modal Project')}
+            </div>
+            <div class="flex gap-2">
+                <button onclick="setProjectFilter('all')" class="px-3 py-1.5 rounded-xl text-xs font-bold ${projectSubFilter === 'all' ? 'neu-accent-btn' : 'neu-btn text-[#6E6A63]'}">Semua</button>
+                <button onclick="setProjectFilter('farming')" class="px-3 py-1.5 rounded-xl text-xs font-bold ${projectSubFilter === 'farming' ? 'neu-accent-btn' : 'neu-btn text-[#6E6A63]'}">Farming</button>
+                <button onclick="setProjectFilter('ngemass')" class="px-3 py-1.5 rounded-xl text-xs font-bold ${projectSubFilter === 'ngemass' ? 'neu-accent-btn' : 'neu-btn text-[#6E6A63]'}">Ngemass</button>
+            </div>
+            <div class="space-y-4">
+                ${filteredProjects.length === 0 ? `<div class="neu-inset rounded-3xl p-8 text-center text-xs text-[#6E6A63]">Belum ada project tersimpan.</div>` : filteredProjects.map(proj => buildProjectCardHtml(proj)).join('')}
+            </div>
+        `;
+    }
+
+    function setProjectFilter(f) { projectSubFilter = f; renderCurrentTab(); }
+
+    function buildProjectCardHtml(proj) {
+        if (proj.type === 'farming') {
+            const estWl = calculateFarmingEstWl(proj);
+            return `
+                <div class="neu-flat rounded-3xl p-4 space-y-3">
+                    <div class="flex justify-between items-start">
+                        <div>
+                            <span class="text-[9px] font-extrabold px-2 py-0.5 rounded-full bg-[#EC5E27]/12 text-[#EC5E27]">FARMING</span>
+                            <h3 class="font-display font-extrabold text-sm mt-1">${escapeHtml(proj.name)}</h3>
+                            <p class="text-[11px] text-[#6E6A63]">World: ${escapeHtml(proj.world)}</p>
+                        </div>
+                        <div class="text-right"><span class="font-display font-extrabold text-sm text-[#EC5E27]">${formatNumber(estWl)} WL</span></div>
+                    </div>
+                    <div class="flex gap-2">
+                        <button onclick="harvestFarmingSeed('${proj.id}')" class="flex-1 py-2 rounded-xl neu-btn text-xs font-bold">Panen (+${formatNumber(proj.avgHarvest)})</button>
+                        <button onclick="openArchiveModal('project', '${proj.id}')" class="py-2 px-4 rounded-xl neu-accent-btn text-xs font-bold">Finish</button>
+                    </div>
+                </div>
+            `;
+        } else {
+            return `
+                <div class="neu-flat rounded-3xl p-4 space-y-3">
+                    <div class="flex justify-between items-start">
+                        <div>
+                            <span class="text-[9px] font-extrabold px-2 py-0.5 rounded-full bg-[#24211E] text-[#FDFDF1]">NGEMASS</span>
+                            <h3 class="font-display font-extrabold text-sm mt-1">${escapeHtml(proj.name)}</h3>
+                            <p class="text-[11px] text-[#6E6A63]">World: ${escapeHtml(proj.world)}</p>
+                        </div>
+                        <div class="text-right"><span class="font-display font-extrabold text-sm text-[#EC5E27]">${formatNumber(proj.estValueWl)} WL</span></div>
+                    </div>
+                    <button onclick="openArchiveModal('project', '${proj.id}')" class="w-full py-2 rounded-xl neu-accent-btn text-xs font-bold">Finish Project</button>
+                </div>
+            `;
+        }
+    }
+
+    function harvestFarmingSeed(id) {
+        const p = appState.projects.find(x => x.id === id);
+        if (!p) return;
+        p.seedStock = (Number(p.seedStock) || 0) + (Number(p.avgHarvest) || 0);
+        saveState(); renderCurrentTab(); showToast(`Panen +${p.avgHarvest} seed ditambahkan!`);
+    }
+
+    function openProjectTypeSelectorModal() {
+        const type = prompt('Ketik jenis project ("farming" atau "ngemass"):');
+        if (type === 'farming') {
+            const name = prompt('Nama Item / Block:');
+            const world = prompt('Nama World:');
+            if (name && world) {
+                appState.projects.unshift({ id: 'proj-' + Date.now(), type: 'farming', name, world: world.toUpperCase(), seedStock: 400, avgHarvest: 120, modalWl: 10, calcMode: 'divide', rateValue: 100 });
+                saveState(); renderCurrentTab(); showToast('Farming ditambahkan!');
+            }
+        } else if (type === 'ngemass') {
+            const name = prompt('Nama Item Ngemass:');
+            const world = prompt('Nama World:');
+            if (name && world) {
+                appState.projects.unshift({ id: 'proj-' + Date.now(), type: 'ngemass', name, world: world.toUpperCase(), batches: [{ batchNo: 1, rows: [{ stock: 200, price: 2 }] }], modalWl: 50, estValueWl: 120 });
+                saveState(); renderCurrentTab(); showToast('Ngemass ditambahkan!');
+            }
+        }
+    }
+
+    // --- TAB 2: PROVIDER ---
     const PROVIDER_DURATIONS_HOURS = { atm: 22, science: 12, tackle: 48 };
     function getAncesReductionPct() { return appState.ances?.enabled ? (Number(appState.ances?.level) || 1) : 0; }
     function getEffectiveDurationMs(type) {
-        const baseHours = PROVIDER_DURATIONS_HOURS[type] || 22;
-        return Math.round(baseHours * (1 - getAncesReductionPct() / 100) * 3600 * 1000);
+        const base = PROVIDER_DURATIONS_HOURS[type] || 22;
+        return Math.round(base * (1 - getAncesReductionPct() / 100) * 3600 * 1000);
     }
     function formatRemainingTimer(ms) {
         if (ms <= 0) return 'SIAP HARVEST';
@@ -604,79 +764,123 @@
     }
 
     function buildProviderTabHtml() {
+        const { providerSeries, providerTotalModal } = getCumulativeModalSeries();
+        const inv = appState.providerInventory;
         return `
-            <div class="neu-flat rounded-3xl p-5 space-y-3">
-                <div class="flex justify-between items-center">
-                    <h2 class="font-display font-extrabold text-base">World Provider Aktif (${appState.providers.length})</h2>
-                    <button onclick="openNewProviderModal()" class="neu-accent-btn px-3 py-2 rounded-xl text-xs font-bold">+ Provider</button>
+            <div class="neu-flat rounded-3xl p-5 space-y-3.5">
+                <div class="flex justify-between items-start">
+                    <div>
+                        <span class="text-[11px] font-bold uppercase tracking-wider text-[#6E6A63]">Modal Provider</span>
+                        <h2 class="font-display font-extrabold text-xl mt-1">${formatNumber(providerTotalModal)} <span class="text-sm font-extrabold text-[#EC5E27]">WL</span></h2>
+                        <span class="text-[11px] font-bold text-[#6E6A63]">${formatBglDlWl(providerTotalModal)}</span>
+                    </div>
+                    <button onclick="openNewProviderModal()" class="neu-accent-btn px-3.5 py-2.5 rounded-2xl text-xs font-bold">+ Provider</button>
                 </div>
-                <div class="space-y-3">
-                    ${appState.providers.length === 0 ? `<p class="text-xs text-[#6E6A63] text-center py-6">Belum ada world provider.</p>` : appState.providers.map(p => `
-                        <div class="neu-inset-sm rounded-2xl p-3.5 space-y-2">
-                            <div class="flex justify-between items-center">
-                                <span class="font-bold text-xs">${escapeHtml(p.world)} (${p.providerType.toUpperCase()})</span>
-                                <span data-prov-timer="${p.id}" class="text-xs font-extrabold text-[#EC5E27]">Memuat...</span>
-                            </div>
-                            <button onclick="triggerHarvest('${p.id}')" class="w-full py-2 rounded-xl neu-accent-btn text-xs font-bold">Harvest</button>
+                ${renderLineChartSvg(providerSeries, '#2563EB', 'grad-prov', 'Grafik Modal Provider')}
+            </div>
+            <div class="neu-flat rounded-3xl p-4 space-y-3">
+                <h3 class="font-display font-extrabold text-xs uppercase tracking-wider">Hasil Panen Provider</h3>
+                <div class="grid grid-cols-3 gap-2">
+                    <div class="neu-inset-sm rounded-2xl p-2.5"><span class="text-[10px] text-[#6E6A63] block">Gems</span><span class="font-display font-extrabold text-xs">${formatNumber(inv.gems)}</span></div>
+                    <div class="neu-inset-sm rounded-2xl p-2.5"><span class="text-[10px] text-[#6E6A63] block">Fuel Pack</span><span class="font-display font-extrabold text-xs">${formatNumber(inv.fuelPacks)}</span></div>
+                    <div class="neu-inset-sm rounded-2xl p-2.5"><span class="text-[10px] text-[#6E6A63] block">Baits</span><span class="font-display font-extrabold text-xs">${Object.values(inv.baits).reduce((a,b)=>a+b,0)}</span></div>
+                </div>
+            </div>
+            <div class="space-y-4">
+                ${appState.providers.length === 0 ? `<div class="neu-inset rounded-3xl p-8 text-center text-xs text-[#6E6A63]">Belum ada World Provider.</div>` : appState.providers.map(p => `
+                    <div class="neu-flat rounded-3xl p-4 space-y-3">
+                        <div class="flex justify-between items-center">
+                            <div><span class="font-display font-extrabold text-sm">${escapeHtml(p.world)}</span> <span class="text-[9px] px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-700 font-bold">${p.providerType.toUpperCase()}</span></div>
+                            <span data-prov-timer="${p.id}" class="font-display font-extrabold text-xs text-[#EC5E27]">Memuat...</span>
                         </div>
-                    `).join('')}
-                </div>
+                        <button onclick="triggerHarvest('${p.id}')" class="w-full py-2.5 rounded-2xl neu-accent-btn text-xs font-bold">Harvest</button>
+                    </div>
+                `).join('')}
             </div>
         `;
     }
 
     function openNewProviderModal() {
-        const world = prompt('Masukkan Nama World Provider:');
+        const world = prompt('Nama World Provider (ATM/Science/Tackle):');
         if (!world) return;
-        appState.providers.unshift({
-            id: 'prov-' + Date.now(),
-            providerType: 'atm',
-            world: world.toUpperCase(),
-            unitCount: 5000,
-            totalModalWl: 1000,
-            readyAt: Date.now() + 10000, // 10 detik untuk tes notif
-            notified: false
-        });
-        saveState();
-        renderCurrentTab();
-        showToast('World Provider ditambahkan!');
+        appState.providers.unshift({ id: 'prov-' + Date.now(), providerType: 'atm', world: world.toUpperCase(), unitCount: 5000, totalModalWl: 1000, readyAt: 0, notified: false });
+        saveState(); renderCurrentTab(); showToast('World Provider ditambahkan!');
     }
 
     function triggerHarvest(id) {
         const prov = appState.providers.find(p => p.id === id);
         if (!prov) return;
+        if (prov.providerType === 'atm') appState.providerInventory.gems += 50000;
         prov.readyAt = Date.now() + getEffectiveDurationMs(prov.providerType);
         prov.notified = false;
-        saveState();
-        renderCurrentTab();
-        showToast('Provider di-harvest! Timer dimulai.');
+        saveState(); renderCurrentTab(); showToast('Harvest berhasil! Timer berjalan.');
     }
 
-    // LIVE TIMER & WHATSAPP NOTIFIER LOOP
-    setInterval(() => {
-        const now = Date.now();
-        let updated = false;
-        appState.providers.forEach(p => {
-            const readyAt = Number(p.readyAt) || 0;
-            if (readyAt > 0 && now >= readyAt && !p.notified) {
-                p.notified = true;
-                updated = true;
-                playProviderReadySound();
-                showToast(`Provider ${p.world} SIAP HARVEST!`);
-                sendFonnteWhatsAppNotification(`[XIKAI ASSET ALERT]\nProvider di World *${p.world}* (${p.providerType.toUpperCase()}) waktu sudah habis! Segera harvest kembali.`);
-            }
-            const timerEl = document.querySelector(`[data-prov-timer="${p.id}"]`);
-            if (timerEl) {
-                timerEl.textContent = formatRemainingTimer(readyAt - now);
-            }
-        });
-        if (updated) saveState();
-    }, 1000);
+    // --- TAB 3: PROFITAN ---
+    function buildProfitanTabHtml() {
+        const { profitanSeries, profitanTotalModal } = getCumulativeModalSeries();
+        return `
+            <div class="neu-flat rounded-3xl p-5 space-y-3.5">
+                <div>
+                    <span class="text-[11px] font-bold uppercase tracking-wider text-[#6E6A63]">Modal Profitan</span>
+                    <h2 class="font-display font-extrabold text-xl mt-1">${formatNumber(profitanTotalModal)} <span class="text-sm font-extrabold text-[#EC5E27]">WL</span></h2>
+                </div>
+                <button onclick="openNewProfitanModal()" class="w-full neu-accent-btn py-2.5 rounded-2xl text-xs font-bold">+ Profitan Baru</button>
+                ${renderLineChartSvg(profitanSeries, '#10B981', 'grad-prof', 'Grafik Modal Profitan')}
+            </div>
+            <div class="space-y-4">
+                ${appState.profitans.length === 0 ? `<div class="neu-inset rounded-3xl p-8 text-center text-xs text-[#6E6A63]">Belum ada item profitan.</div>` : appState.profitans.map(item => `
+                    <div class="neu-flat rounded-3xl p-4 space-y-3">
+                        <div class="flex justify-between">
+                            <div><h3 class="font-display font-extrabold text-sm">${escapeHtml(item.name)}</h3><p class="text-[11px] text-[#6E6A63]">${escapeHtml(item.note)}</p></div>
+                            <span class="font-display font-extrabold text-sm text-[#EC5E27]">${formatBglDlWl(item.targetWl)}</span>
+                        </div>
+                        <button onclick="openArchiveModal('profitan', '${item.id}')" class="w-full py-2 rounded-xl neu-accent-btn text-xs font-bold">Sold / Finish</button>
+                    </div>
+                `).join('')}
+            </div>
+        `;
+    }
 
-    function buildProfitanTabHtml() { return `<div class="neu-flat rounded-3xl p-5"><h2 class="font-display font-extrabold">Profitan</h2></div>`; }
-    function buildRiwayatTabHtml() { return `<div class="neu-flat rounded-3xl p-5"><h2 class="font-display font-extrabold">Riwayat</h2></div>`; }
+    function openNewProfitanModal() {
+        const name = prompt('Nama Item / Event Flipping:');
+        if (!name) return;
+        appState.profitans.unshift({ id: 'prof-' + Date.now(), mode: 'beli', name, note: 'Catatan strategi', image: '', modalWl: 50, targetWl: 90 });
+        saveState(); renderCurrentTab(); showToast('Profitan ditambahkan!');
+    }
 
-    // PROFIL TAB (DENGAN NOMOR WA DAN FONNTE TOKEN)
+    // --- TAB 4: RIWAYAT ---
+    function buildRiwayatTabHtml() {
+        let totalClean = 0, running = 0;
+        const profitSeries = appState.history.slice().reverse().map(h => { running += Number(h.cleanProfit) || 0; totalClean += Number(h.cleanProfit) || 0; return running; });
+        const { projectSeries, providerSeries, profitanSeries } = getCumulativeModalSeries();
+
+        return `
+            <div class="neu-flat rounded-3xl p-5 space-y-4">
+                <div>
+                    <span class="text-[11px] font-bold uppercase tracking-wider text-[#6E6A63]">Akumulasi Clean Profit</span>
+                    <h2 class="font-display font-extrabold text-xl text-emerald-600 mt-1">${formatBglDlWl(totalClean)}</h2>
+                </div>
+                ${renderLineChartSvg(profitSeries, '#059669', 'grad-hist', 'Grafik Clean Profit')}
+            </div>
+            <div class="neu-flat rounded-3xl p-5 space-y-3">
+                <h3 class="font-display font-extrabold text-sm">Grafik Perbandingan Modal</h3>
+                ${renderLineChartSvg(projectSeries, '#EC5E27', 'grad-m1', 'Modal Project')}
+                ${renderLineChartSvg(providerSeries, '#2563EB', 'grad-m2', 'Modal Provider')}
+                ${renderLineChartSvg(profitanSeries, '#10B981', 'grad-m3', 'Modal Profitan')}
+            </div>
+            <div class="space-y-3">
+                ${appState.history.length === 0 ? `<div class="neu-inset rounded-3xl p-8 text-center text-xs text-[#6E6A63]">Belum ada riwayat arsip.</div>` : appState.history.map(h => `
+                    <div class="neu-flat rounded-3xl p-4 flex justify-between items-center">
+                        <div><span class="text-[9px] font-bold px-2 py-0.5 rounded-full bg-[#EC5E27]/12 text-[#EC5E27]">${escapeHtml(h.category)}</span><h4 class="font-bold text-xs mt-1">${escapeHtml(h.name)}</h4></div>
+                        <span class="font-display font-extrabold text-xs text-emerald-600">+${formatBglDlWl(h.cleanProfit)}</span>
+                    </div>
+                `).join('')}
+            </div>
+        `;
+    }
+
+    // --- TAB 5: PROFIL & WHATSAPP ---
     function buildProfilTabHtml() {
         return `
             <div class="neu-flat rounded-3xl p-5 space-y-4">
@@ -705,10 +909,51 @@
         appState.profile.shortName = document.getElementById('prof-short').value.trim();
         appState.profile.whatsappNumber = document.getElementById('prof-wa').value.trim();
         appState.profile.fonnteToken = document.getElementById('prof-token').value.trim();
-        saveState();
-        renderCurrentTab();
-        showToast('Profil & Konfigurasi WhatsApp berhasil disimpan!');
+        saveState(); renderCurrentTab(); showToast('Profil & WhatsApp tersimpan!');
     }
+
+    // --- ARSIP & FINISH MODAL ---
+    function openArchiveModal(source, id) {
+        const sold = prompt('Masukkan jumlah WL hasil terjual:');
+        if (!sold) return;
+        const soldWl = Number(sold) || 0;
+        let name = '', modal = 0, cat = '';
+        if (source === 'project') {
+            const idx = appState.projects.findIndex(p => p.id === id);
+            if (idx === -1) return;
+            const p = appState.projects[idx];
+            name = p.name; modal = Number(p.modalWl) || 0; cat = 'Project';
+            appState.projects.splice(idx, 1);
+        } else {
+            const idx = appState.profitans.findIndex(p => p.id === id);
+            if (idx === -1) return;
+            const pf = appState.profitans[idx];
+            name = pf.name; modal = Number(pf.modalWl) || 0; cat = 'Profitan';
+            appState.profitans.splice(idx, 1);
+        }
+        const cleanProfit = soldWl - modal;
+        appState.history.unshift({ id: 'hist-' + Date.now(), category: cat, name, soldWl, modalWl: modal, cleanProfit, date: new Date().toLocaleDateString('id-ID') });
+        saveState(); renderCurrentTab(); showToast(`Diarsipkan! Clean profit: ${formatBglDlWl(cleanProfit)}`);
+    }
+
+    // --- LIVE TIMER & WHATSAPP NOTIFIER ---
+    setInterval(() => {
+        const now = Date.now();
+        let updated = false;
+        appState.providers.forEach(p => {
+            const readyAt = Number(p.readyAt) || 0;
+            if (readyAt > 0 && now >= readyAt && !p.notified) {
+                p.notified = true;
+                updated = true;
+                playProviderReadySound();
+                showToast(`Provider ${p.world} SIAP HARVEST!`);
+                sendFonnteWhatsAppNotification(`[XIKAI ASSET ALERT]\nProvider di World *${p.world}* (${p.providerType.toUpperCase()}) waktu sudah habis! Segera harvest kembali.`);
+            }
+            const timerEl = document.querySelector(`[data-prov-timer="${p.id}"]`);
+            if (timerEl) timerEl.textContent = formatRemainingTimer(readyAt - now);
+        });
+        if (updated) saveState();
+    }, 1000);
 
     function escapeHtml(str) {
         return String(str ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -718,7 +963,7 @@
         applyBrandArtworks();
         syncHeaderProfile();
         safeCreateIcons();
-        switchTab('provider');
+        switchTab('project');
         setTimeout(() => document.getElementById('splash-screen')?.remove(), 400);
     });
 </script>
